@@ -1,0 +1,4 @@
+build/
+test.cpp
+mpu60py.py
+main.cpp
