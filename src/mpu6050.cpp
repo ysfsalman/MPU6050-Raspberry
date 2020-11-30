@@ -1,5 +1,6 @@
 #include "mpu6050.h"
 
+std::mutex MPU6050::mtx;
 
 MPU6050::MPU6050():i2cdev{MPU6050_I2C_ADDRESS}{
     // initialize 
@@ -7,14 +8,22 @@ MPU6050::MPU6050():i2cdev{MPU6050_I2C_ADDRESS}{
 }
 
 void MPU6050::initialize(){
-    // set configs
-    // set power management
+    // Set configs
+    // Set power management
     setConfig(MPU6050_PWR_MGMT_1,0x00);
-    // set resolution
+    // Set resolution
     setConfig(MPU6050_GYRO_CONFIG,0x00); // FS_SEL 0 : 250 deg/s
     setConfig(MPU6050_ACCEL_CONFIG,0x00); // AFS_SEL 0 : 2 g/s
-    // callibration
+    // Conversion constant value
+    DEG_SENSITIVITY = 131;
+    // Calibration
     calibrate();
+    // Physical initial value
+    rollAngle   = 0;
+    pitchAngle  = 0;
+    lastUpdate  = std::chrono::system_clock::now();
+    // start thread
+    mpuProcess = std::thread(&MPU6050::updateAngle,this);
 }
 
 void MPU6050::meanSensor(int16_t **meanArray){
@@ -71,22 +80,31 @@ void MPU6050::calibrate(){
 
     // set initial offset
     setOffset(0,0,0,0,0,0);
-
+    
     // get mean sensor
     meanSensor(meanArr);
-
-    // set offset
+    
+    // set offset    
     int16_t ax_offset=-mean_accX/8;
     int16_t ay_offset=-mean_accY/8;
     int16_t az_offset=(16384-mean_accZ)/8;
     int16_t gx_offset=-mean_gyroX/4;
     int16_t gy_offset=-mean_gyroY/4;
     int16_t gz_offset=-mean_gyroZ/4;
-
+    // my device calibration value
+    int16_t ax_offset= -621;
+    int16_t ay_offset= 3405;
+    int16_t az_offset= 5426;
+    int16_t gx_offset= -11;
+    int16_t gy_offset= 23;
+    int16_t gz_offset= -41;
+    
     while(1){
         int ready = 0;
         setOffset(ax_offset, ay_offset, az_offset, gx_offset, gy_offset, gz_offset);        
         meanSensor(meanArr);
+        printf("x : %i | y : %i | z : %i \n", ax_offset, ay_offset, az_offset);
+        printf("------- gx : %i | gy : %i | gz : %i \n ------- \n", gx_offset, gy_offset, gz_offset);
         
         if (abs(mean_accX)<=accel_deadzone) ready++;
         else ax_offset=ax_offset-mean_accX/accel_deadzone;
@@ -109,6 +127,23 @@ void MPU6050::calibrate(){
         if (ready==6) break;
     }
 }
+
+// Get orientation from complementary measurement
+void MPU6050::updateAngle(){
+    while(1){
+        std::unique_lock<std::mutex> lck(mtx);
+        rollAngle = 0.98*(rollAngle + getGyroRoll()) + 0.02 * getAccRoll();
+        pitchAngle= 0.98*(pitchAngle + getGyroPitch()) + 0.02 * getAccPitch();
+        lastUpdate = std::chrono::system_clock::now();
+        //printf("roll : %f\n", rollAngle);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        lck.unlock();
+    }
+}
+
+/*---------------------------------------------------------------
+Setter function
+----------------------------------------------------------------*/
 
 void MPU6050::setConfig(char regAddress, char value){
     char config[2];
@@ -135,6 +170,10 @@ void MPU6050::setOffset(int16_t aXoff, int16_t aYoff, int16_t aZoff,
     set2BytesConfig(MPU6050_ZG_OFFSET_H, gZoff);
 }
 
+/*---------------------------------------------------------------
+Getter function
+----------------------------------------------------------------*/
+
 int16_t MPU6050::get2Bytes(char regAddress){
     // initalize variables
     char buffer[2];
@@ -147,7 +186,7 @@ int16_t MPU6050::get2Bytes(char regAddress){
     return twoBytesVal;
 }
 
-// get accelerometer and gyroscope value
+// Get accelerometer and gyroscope value
 int16_t MPU6050::getAccelX(){
     return get2Bytes(MPU6050_ACCEL_XOUT_H);
 }
@@ -172,42 +211,33 @@ int16_t MPU6050::getRotationZ(){
     return get2Bytes(MPU6050_GYRO_ZOUT_H);
 }
 
-// relative angle change
-// consider bias later
+// Get orientation from sensors
 float MPU6050::getAccRoll(){
-    return (float)(atan2(getAccelY(),getAccelZ())*RAD_TO_DEG;    
-}
-
-float MPU6050::getAccYaw(){
-    return (float)(atan2(getAccelX(),getAccelY())*RAD_TO_DEG;
+    return (float)(atan2(getAccelY(),getAccelZ()))*RAD_TO_DEG;    
 }
 
 float MPU6050::getAccPitch(){
-    return (float)(atan2(getAccelZ(),getAccelX())*RAD_TO_DEG;    
+    int16_t accY = getAccelY();
+    int16_t accZ = getAccelZ();
+    return (float)(atan2(-1*getAccelX(),sqrt(accY*accY + accZ*accZ)))*RAD_TO_DEG;    
 }
 
 
-void MPU6050::runAngle(){
-    // start thread
-    std::thread t(updateGyroOrientation);
+float MPU6050::getGyroRoll(){
+    long duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - lastUpdate).count();
+    return (getRotationX()/DEG_SENSITIVITY)*(duration/1000000); 
 }
 
-float MPU6050::updateGyroOrientation(){    
-    // current_angle  = initial angle;
+float MPU6050::getGyroPitch(){
+    long duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - lastUpdate).count();
+    return (getRotationY()/DEG_SENSITIVITY)*(duration/1000000); 
+}
 
-    // last_time = get time;
-    std::chrono::time_point<std::chrono::system_clock> lastUpdate;
-    lastUpdate = std::chrono::system_clock::now();
-    while(true){
-        // sleep every iteration
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        // duration = get time - last_time
-        long timeSinceLastUpdate = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - lastUpdate).count();
-        // get gyro_roll_value = gyro speed * converter * duration
-        
-        // get acc_roll_value = atan2(y,z)
-        // current_angle  =  0.98*(gyro_roll_value+current_angle) + 0.02 * acc_roll_value
-        lastUpdate = std::chrono::system_clock::now();
-    }
 
-    
+float MPU6050::getRoll(){
+    return rollAngle;
+}
+
+float MPU6050::getPitch(){
+    return pitchAngle;
+}

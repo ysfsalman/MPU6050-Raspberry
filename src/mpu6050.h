@@ -3,13 +3,11 @@
 
 #include <stdlib.h>
 #include <stdint.h>
-
-
+#include <math.h> 
 // additional for thread and processing
-#include <math.h>
-#include <chrono.h>
+#include <chrono>
 #include <thread>
-
+#include <mutex>
 #include "i2cdev.h"
 
 
@@ -33,7 +31,19 @@
 // based on MPU6000 register map
 #define MPU6050_SMPLRT_DIV         0x19   // R/W
 #define MPU6050_CONFIG             0x1A   // R/W
+// gyroscope FSR
+// 0:+/-250deg/s 1:+/-500deg/s 2:+/-1000deg/s 3:+/-2000deg/s
+// AFS_SEL = 0 means 1 bit = 500/2^16 = 0.00762 deg/s
+// AFS_SEL = 1 means 1 bit = 1000/2^16 = 0.01525 deg/s
+// AFS_SEL = 2 means 1 bit = 2000/2^16 = 0.03051 deg/s
+// AFS_SEL = 3 means 1 bit = 4000/2^16 = 0.06103 deg/s
 #define MPU6050_GYRO_CONFIG        0x1B   // R/W
+// accelerometer FSR 
+// 0:+/-2g 1:+/-4g 2:+/-8g 3:+/-16g 
+// AFS_SEL = 0 means 1 bit = 4g/2^16 = 61.03515e-6 g
+// AFS_SEL = 1 means 1 bit = 8g/2^16 = 122.07031e-6 g
+// AFS_SEL = 2 means 1 bit = 16g/2^16 = 244.14062e-6 g
+// AFS_SEL = 3 means 1 bit = 32g/2^16 = 488.28125e-6 g
 #define MPU6050_ACCEL_CONFIG       0x1C   // R/W
 #define MPU6050_FF_THR             0x1D   // R/W
 #define MPU6050_FF_DUR             0x1E   // R/W
@@ -127,10 +137,12 @@
 
 class MPU6050:public i2cdev{   
 public:
+    // class routine
     MPU6050();
     void initialize();
     void calibrate();
     void meanSensor(int16_t **meanArray);
+    void updateAngle();
     // setter
     void setConfig(char regAddress, char value);
     void set2BytesConfig(char regAddress, int16_t value);
@@ -147,12 +159,20 @@ public:
     float getAccRoll();
     float getAccYaw();
     float getAccPitch();
+    float getGyroRoll();
+    float getGyroPitch();
+    float getRoll();
+    float getPitch();   
+    
 private:
-    // time variable
+    // conversion constant
+    float DEG_SENSITIVITY;
+    // sensor information variable
+    float rollAngle, pitchAngle;
+    // process variable
+    std::thread mpuProcess;
+    std::chrono::time_point<std::chrono::system_clock> lastUpdate;
+    static std::mutex mtx;
 };
-
-
-
-
 
 #endif 
